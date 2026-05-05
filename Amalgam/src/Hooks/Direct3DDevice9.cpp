@@ -15,7 +15,6 @@ MAKE_HOOK(Direct3DDevice9_Present, U::Memory.GetVirtual(I::DirectXDevice, 17), H
 	if (!G::Unload)
 	{
 		F::Render.Render(pDevice);
-		F::PixelFinder.Render();
 	}
 
 	return CALL_ORIGINAL(pDevice, pSource, pDestination, pDirtyRegion);

@@ -13,6 +13,7 @@
 #include "../Features/Visuals/CameraWindow/CameraWindow.h"
 #include "../Features/Visuals/Notifications/Notifications.h"
 #include "../Features/Aimbot/AutoHeal/AutoHeal.h"
+#include "../Features/PixelFinder/PixelFinder.h"
 
 MAKE_HOOK(IEngineVGui_Paint, U::Memory.GetVirtual(I::EngineVGui, 14), void,
 	void* rcx, int iMode)
@@ -48,6 +49,7 @@ MAKE_HOOK(IEngineVGui_Paint, U::Memory.GetVirtual(I::EngineVGui, 14), void,
 			F::CritHack.Draw(pLocal);
 			F::Ticks.Draw(pLocal);
 			F::Visuals.DrawDebugInfo(pLocal);
+			F::PixelFinder.Render();
 		}
 		H::Draw.End();
 	}

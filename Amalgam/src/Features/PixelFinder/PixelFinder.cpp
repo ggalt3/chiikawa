@@ -5,9 +5,6 @@ void CPixelFinder::DrawVerticalLine(CTFPlayer* pLocal, CUserCmd* pCmd)
 	if (!Vars::Misc::PixelFinder::Enabled.Value || !pLocal || !pLocal->IsAlive())
 		return;
 
-	// Temporarily disable trace operations to isolate crash
-	return;
-
 	// Check if the line drawing key is held
 	if (GetAsyncKeyState(Vars::Misc::PixelFinder::DrawLineKey.Value) & 0x8000)
 	{
@@ -109,6 +106,9 @@ void CPixelFinder::DetectPixelSurfPoints(CTFPlayer* pLocal, CUserCmd* pCmd)
 	float flStep = Vars::Misc::PixelFinder::DetectionStep.Value;
 	int iMaxPoints = static_cast<int>(flLineLength / flStep);
 
+	std::vector<PixelSurfPoint_t> vNewPoints;
+	vNewPoints.reserve(iMaxPoints + 1);
+
 	for (int i = 0; i <= iMaxPoints; i++)
 	{
 		float flLerp = (static_cast<float>(i) / iMaxPoints);
@@ -136,9 +136,12 @@ void CPixelFinder::DetectPixelSurfPoints(CTFPlayer* pLocal, CUserCmd* pCmd)
 			point.m_bIsAppearing = true;
 			point.m_bIsRemoving = false;
 			point.m_flCurrentSize = 0.f;
-			m_vDetectedPoints.push_back(point);
+			vNewPoints.push_back(point);
 		}
 	}
+
+	// Swap vectors to minimize race condition window
+	m_vDetectedPoints.swap(vNewPoints);
 	m_bClearingPoints = false;
 }
 
@@ -199,6 +202,10 @@ void CPixelFinder::RenderPoints()
 	if (!Vars::Misc::PixelFinder::Enabled.Value)
 		return;
 
+	// Thread safety: Don't render if points are being modified
+	if (m_bClearingPoints)
+		return;
+
 	float flDeltaTime = I::GlobalVars->frametime;
 	const float flAppearanceDuration = 0.5f;
 	const float flDisappearanceDuration = 0.5f;
@@ -206,8 +213,14 @@ void CPixelFinder::RenderPoints()
 	const float flNormalSize = 9.f;
 	const float flInCrosshairSize = 12.f;
 
-	// Update animations
-	for (auto& point : m_vDetectedPoints)
+	// Create a copy of points to avoid race conditions
+	std::vector<PixelSurfPoint_t> vPointsCopy;
+	{
+		vPointsCopy = m_vDetectedPoints;
+	}
+
+	// Update animations on the copy
+	for (auto& point : vPointsCopy)
 	{
 		if (point.m_bIsAppearing)
 		{
@@ -254,14 +267,8 @@ void CPixelFinder::RenderPoints()
 		point.m_flCurrentSize += (flTargetSize - point.m_flCurrentSize) * (1.f - exp(-flSizeAnimationSpeed * flDeltaTime));
 	}
 
-	// Remove points that are done disappearing
-	m_vDetectedPoints.erase(
-		std::remove_if(m_vDetectedPoints.begin(), m_vDetectedPoints.end(),
-			[](const PixelSurfPoint_t& point) { return point.m_bIsRemoving && point.m_flAnimationProgress <= 0.f; }),
-		m_vDetectedPoints.end());
-
-	// Draw points
-	for (const auto& point : m_vDetectedPoints)
+	// Draw points from the copy
+	for (const auto& point : vPointsCopy)
 	{
 		Vec3 vScreenPos;
 		if (SDK::W2S(point.m_vPosition, vScreenPos))
@@ -299,10 +306,20 @@ void CPixelFinder::RenderPoints()
 
 void CPixelFinder::RenderSavedPoints()
 {
-	if (!Vars::Misc::PixelFinder::Enabled.Value || m_bClearingPoints)
+	if (!Vars::Misc::PixelFinder::Enabled.Value)
 		return;
 
-	for (const auto& point : m_vSavedPoints)
+	// Thread safety: Don't render if points are being modified
+	if (m_bClearingPoints)
+		return;
+
+	// Create a copy to avoid race conditions
+	std::vector<PixelSurfPoint_t> vSavedCopy;
+	{
+		vSavedCopy = m_vSavedPoints;
+	}
+
+	for (const auto& point : vSavedCopy)
 	{
 		Vec3 vScreenPos;
 		if (SDK::W2S(point.m_vPosition, vScreenPos))
@@ -328,19 +345,31 @@ void CPixelFinder::RenderSavedPoints()
 
 void CPixelFinder::Render()
 {
-	// Temporarily disable rendering to isolate crash
-	return;
-	
 	if (!Vars::Misc::PixelFinder::Enabled.Value)
 		return;
 
-	// Draw the line after detection is complete
-	if (!m_bDrawingLine && !m_vLineStart.IsZero() && !m_vLineEnd.IsZero())
+	// Create local copies of coordinates to avoid race conditions
+	Vec3 vLineStart = m_vLineStart;
+	Vec3 vLineEnd = m_vLineEnd;
+
+	// Draw the line - always draw if coordinates are valid
+	if (!vLineStart.IsZero() && !vLineEnd.IsZero())
 	{
 		Vec3 vStartScreen, vEndScreen;
-		if (SDK::W2S(m_vLineStart, vStartScreen) && 
-			SDK::W2S(m_vLineEnd, vEndScreen))
+		if (SDK::W2S(vLineStart, vStartScreen) && 
+			SDK::W2S(vLineEnd, vEndScreen))
 		{
+			// Validate screen coordinates
+			if (!isfinite(vStartScreen.x) || !isfinite(vStartScreen.y) ||
+				!isfinite(vEndScreen.x) || !isfinite(vEndScreen.y))
+				return;
+			if (vStartScreen.x < 0 || vStartScreen.x > H::Draw.m_nScreenW ||
+				vStartScreen.y < 0 || vStartScreen.y > H::Draw.m_nScreenH)
+				return;
+			if (vEndScreen.x < 0 || vEndScreen.x > H::Draw.m_nScreenW ||
+				vEndScreen.y < 0 || vEndScreen.y > H::Draw.m_nScreenH)
+				return;
+
 			Color_t tLineColor = Vars::Misc::PixelFinder::LineColor.Value;
 			if (tLineColor.a > 0)
 			{
@@ -349,8 +378,9 @@ void CPixelFinder::Render()
 		}
 	}
 
-	RenderPoints();
-	RenderSavedPoints();
+	// Disable point rendering to isolate which function causes crash
+	// RenderPoints();
+	// RenderSavedPoints();
 }
 
 bool CPixelFinder::InCrosshair(const Vec2& vScreenPos, float flRadius)
@@ -378,14 +408,29 @@ void CPixelFinder::SavePoint()
 	if (!Vars::Misc::PixelFinder::Enabled.Value)
 		return;
 
+	// Thread safety: Don't modify while rendering
+	if (m_bClearingPoints)
+		return;
+
+	// Create a copy to avoid race conditions
+	std::vector<PixelSurfPoint_t> vDetectedCopy;
+	{
+		vDetectedCopy = m_vDetectedPoints;
+	}
+
 	// Find the point in crosshair and save it
-	for (const auto& point : m_vDetectedPoints)
+	for (const auto& point : vDetectedCopy)
 	{
 		if (point.m_bInCrosshair)
 		{
 			// Check if point already exists
 			bool bExists = false;
-			for (const auto& saved : m_vSavedPoints)
+			std::vector<PixelSurfPoint_t> vSavedCopy;
+			{
+				vSavedCopy = m_vSavedPoints;
+			}
+			
+			for (const auto& saved : vSavedCopy)
 			{
 				if (saved.m_vPosition.DistTo(point.m_vPosition) < 1.0f)
 				{
@@ -399,10 +444,11 @@ void CPixelFinder::SavePoint()
 				PixelSurfPoint_t newPoint = point;
 				newPoint.m_bIsAppearing = false;
 				newPoint.m_flAnimationProgress = 1.f;
-				m_vSavedPoints.push_back(newPoint);
 				
-				// Clear detected points after saving
+				m_bClearingPoints = true;
+				m_vSavedPoints.push_back(newPoint);
 				m_vDetectedPoints.clear();
+				m_bClearingPoints = false;
 				return;
 			}
 		}
@@ -416,7 +462,9 @@ void CPixelFinder::ClearPoints()
 
 void CPixelFinder::ClearSavedPoints()
 {
+	m_bClearingPoints = true;
 	m_vSavedPoints.clear();
+	m_bClearingPoints = false;
 }
 
 void CPixelFinder::Run(CTFPlayer* pLocal, CUserCmd* pCmd)
