@@ -1,4 +1,6 @@
 #include "PixelFinder.h"
+#include "../EnginePrediction/EnginePrediction.h"
+#include <cmath>
 
 void CPixelFinder::DrawVerticalLine(CTFPlayer* pLocal, CUserCmd* pCmd)
 {
@@ -60,8 +62,8 @@ void CPixelFinder::DrawVerticalLine(CTFPlayer* pLocal, CUserCmd* pCmd)
 	{
 		if (m_bDrawingLine)
 		{
-			// Temporarily disable detection to test line drawing
-			// DetectPixelSurfPoints(pLocal, pCmd);
+			// Detect pixelsurf points when line is complete
+			DetectPixelSurfPoints(pLocal, pCmd);
 			m_bDrawingLine = false;
 		}
 		// Only clear first point when starting new line, keep line for visualization
@@ -102,35 +104,122 @@ void CPixelFinder::DetectPixelSurfPoints(CTFPlayer* pLocal, CUserCmd* pCmd)
 	float flTickRate = 1.0f / I::GlobalVars->interval_per_tick;
 	float flTargetZVel = -((flGravity / 2.0f) / flTickRate);
 
-	// Test points along the line
-	float flStep = Vars::Misc::PixelFinder::DetectionStep.Value;
-	int iMaxPoints = static_cast<int>(flLineLength / flStep);
+	// Offset value based on surface type (DNA approach)
+	float flTestAl = 15.97803f;
+	if (m_bIsDisplacement)
+		flTestAl = 16.001f;
 
+	// Store original player state
+	Vec3 vOriginalOrigin = pLocal->m_vecOrigin();
+	Vec3 vOriginalVelocity = pLocal->m_vecVelocity();
+	int nOriginalFlags = pLocal->m_fFlags();
+	int nOriginalButtons = pCmd->buttons;
+	float flOriginalForwardMove = pCmd->forwardmove;
+	float flOriginalSideMove = pCmd->sidemove;
+
+	// Scan along the vertical line (DNA approach - unit intervals)
 	std::vector<PixelSurfPoint_t> vNewPoints;
-	vNewPoints.reserve(iMaxPoints + 1);
+	int iMaxSteps = static_cast<int>(flLineLength);
+	vNewPoints.reserve(iMaxSteps + 1);
 
-	for (int i = 0; i <= iMaxPoints; i++)
+	for (int i = 0; i <= iMaxSteps; i++)
 	{
-		float flLerp = (static_cast<float>(i) / iMaxPoints);
-		Vec3 vTestPos = {
-			m_vLineStart.x,
-			m_vLineStart.y,
-			m_vLineStart.z + (m_vLineEnd.z - m_vLineStart.z) * flLerp
-		};
+		float flLerp = static_cast<float>(i);
+		float flHeight;
+		
+		if (m_vLineStart.z > m_vLineEnd.z)
+			flHeight = m_vLineStart.z - flLerp;
+		else
+			flHeight = m_vLineEnd.z - flLerp;
 
-		// Offset position based on wall normal for player collision
-		float flOffset = 16.0f;
-		if (m_bIsDisplacement)
-			flOffset = 16.031f;
+		// Calculate player position offset from wall based on wall normal (DNA geometric approach)
+		Vec3 vPlayerPos = m_vLineStart;
+		
+		if (m_vWallNormal.x < 0 && m_vWallNormal.y < 0.f)
+			vPlayerPos = { m_vLineStart.x - flTestAl, m_vLineStart.y - flTestAl, flHeight };
+		else if (m_vWallNormal.x < 0 && m_vWallNormal.y > 0.f)
+			vPlayerPos = { m_vLineStart.x - flTestAl, m_vLineStart.y + flTestAl, flHeight };
+		else if (m_vWallNormal.x > 0 && m_vWallNormal.y < 0.f)
+			vPlayerPos = { m_vLineStart.x + flTestAl, m_vLineStart.y - flTestAl, flHeight };
+		else if (m_vWallNormal.x > 0 && m_vWallNormal.y > 0.f)
+			vPlayerPos = { m_vLineStart.x + flTestAl, m_vLineStart.y + flTestAl, flHeight };
+		else if (m_vWallNormal.x == 0.f && m_vWallNormal.y > 0.f)
+			vPlayerPos = { m_vLineStart.x, m_vLineStart.y + flTestAl, flHeight };
+		else if (m_vWallNormal.x == 0.f && m_vWallNormal.y < 0.f)
+			vPlayerPos = { m_vLineStart.x, m_vLineStart.y - flTestAl, flHeight };
+		else if (m_vWallNormal.x < 0 && m_vWallNormal.y == 0.f)
+			vPlayerPos = { m_vLineStart.x - flTestAl, m_vLineStart.y, flHeight };
+		else if (m_vWallNormal.x > 0 && m_vWallNormal.y == 0.f)
+			vPlayerPos = { m_vLineStart.x + flTestAl, m_vLineStart.y, flHeight };
 
-		Vec3 vPlayerPos = vTestPos + m_vWallNormal * flOffset;
-		vPlayerPos.z -= 54.0f; // Adjust for player eye height
+		// Check if position is valid (between floor and ceiling) - geometric check
+		CGameTrace traceDown = {};
+		Ray_t rayDown;
+		rayDown.Init({ vPlayerPos.x, vPlayerPos.y, vPlayerPos.z + 54.f }, { vPlayerPos.x, vPlayerPos.y, vPlayerPos.z - 1000.f });
+		CTraceFilterWorldAndPropsOnly filterDown;
+		filterDown.pSkip = pLocal;
+		I::EngineTrace->TraceRay(rayDown, MASK_SOLID, &filterDown, &traceDown);
 
-		// Test if this position can pixelsurf
-		if (TestPixelSurfAtPosition(pLocal, vPlayerPos, m_vWallNormal, pCmd))
+		CGameTrace traceUp = {};
+		Ray_t rayUp;
+		rayUp.Init({ vPlayerPos.x, vPlayerPos.y, vPlayerPos.z + 54.f }, { vPlayerPos.x, vPlayerPos.y, vPlayerPos.z + 1000.f });
+		CTraceFilterWorldAndPropsOnly filterUp;
+		filterUp.pSkip = pLocal;
+		I::EngineTrace->TraceRay(rayUp, MASK_SOLID, &filterUp, &traceUp);
+
+		// Skip if not between floor and ceiling (geometric constraint)
+		if (vPlayerPos.z + 1.f < traceDown.endpos.z || vPlayerPos.z + 1.f > traceUp.endpos.z)
+			continue;
+
+		// Set player to test position
+		pLocal->m_vecOrigin() = vPlayerPos;
+		pLocal->m_vecVelocity() = { 0.f, 0.f, 0.f };
+		pLocal->m_fFlags() &= ~FL_ONGROUND;
+
+		// Set movement input to align with wall (DNA approach)
+		Vec3 vWallAngles = { -m_vWallNormal.x, -m_vWallNormal.y, 0.f };
+		Vec3 vToWall;
+		Math::VectorAngles(vWallAngles, vToWall);
+		float flRotation = Math::Deg2Rad(vToWall.y - pCmd->viewangles.y);
+		float flCosRot = cos(flRotation);
+		float flSinRot = sin(flRotation);
+		pCmd->forwardmove = flCosRot * 10.f;
+		pCmd->sidemove = -flSinRot * 10.f;
+		pCmd->buttons |= IN_JUMP;
+		pCmd->buttons |= IN_DUCK;
+
+		// Run prediction
+		F::EnginePrediction.Start(pLocal, pCmd);
+		F::EnginePrediction.End(pLocal, pCmd);
+
+		// Check if Z velocity matches pixelsurf velocity
+		Vec3 vPredictedVelocity = pLocal->m_vecVelocity();
+		bool bIsPixelSurfVel = (fabs(vPredictedVelocity.z - flTargetZVel) < 0.5f);
+
+		if (bIsPixelSurfVel)
 		{
+			// Calculate the actual pixelsurf point (offset back from wall)
+			Vec3 vPixelSurfPoint = vPlayerPos;
+			
+			if (m_vWallNormal.x < 0 && m_vWallNormal.y < 0.f)
+				vPixelSurfPoint = { vPlayerPos.x + flTestAl, vPlayerPos.y + flTestAl, vPlayerPos.z };
+			else if (m_vWallNormal.x < 0 && m_vWallNormal.y > 0.f)
+				vPixelSurfPoint = { vPlayerPos.x + flTestAl, vPlayerPos.y - flTestAl, vPlayerPos.z };
+			else if (m_vWallNormal.x > 0 && m_vWallNormal.y < 0.f)
+				vPixelSurfPoint = { vPlayerPos.x - flTestAl, vPlayerPos.y + flTestAl, vPlayerPos.z };
+			else if (m_vWallNormal.x > 0 && m_vWallNormal.y > 0.f)
+				vPixelSurfPoint = { vPlayerPos.x - flTestAl, vPlayerPos.y - flTestAl, vPlayerPos.z };
+			else if (m_vWallNormal.x == 0.f && m_vWallNormal.y > 0.f)
+				vPixelSurfPoint = { vPlayerPos.x, vPlayerPos.y - flTestAl, vPlayerPos.z };
+			else if (m_vWallNormal.x == 0.f && m_vWallNormal.y < 0.f)
+				vPixelSurfPoint = { vPlayerPos.x, vPlayerPos.y + flTestAl, vPlayerPos.z };
+			else if (m_vWallNormal.x < 0 && m_vWallNormal.y == 0.f)
+				vPixelSurfPoint = { vPlayerPos.x + flTestAl, vPlayerPos.y, vPlayerPos.z };
+			else if (m_vWallNormal.x > 0 && m_vWallNormal.y == 0.f)
+				vPixelSurfPoint = { vPlayerPos.x - flTestAl, vPlayerPos.y, vPlayerPos.z };
+
 			PixelSurfPoint_t point;
-			point.m_vPosition = vTestPos;
+			point.m_vPosition = vPixelSurfPoint;
 			point.m_sMap = I::EngineClient->GetLevelName();
 			point.m_flAnimationProgress = 0.f;
 			point.m_bIsAppearing = true;
@@ -140,6 +229,14 @@ void CPixelFinder::DetectPixelSurfPoints(CTFPlayer* pLocal, CUserCmd* pCmd)
 		}
 	}
 
+	// Restore original state
+	pLocal->m_vecOrigin() = vOriginalOrigin;
+	pLocal->m_vecVelocity() = vOriginalVelocity;
+	pLocal->m_fFlags() = nOriginalFlags;
+	pCmd->buttons = nOriginalButtons;
+	pCmd->forwardmove = flOriginalForwardMove;
+	pCmd->sidemove = flOriginalSideMove;
+
 	// Swap vectors to minimize race condition window
 	m_vDetectedPoints.swap(vNewPoints);
 	m_bClearingPoints = false;
@@ -147,54 +244,50 @@ void CPixelFinder::DetectPixelSurfPoints(CTFPlayer* pLocal, CUserCmd* pCmd)
 
 bool CPixelFinder::TestPixelSurfAtPosition(CTFPlayer* pLocal, const Vec3& vPosition, const Vec3& vWallNormal, CUserCmd* pCmd)
 {
-	// Trace down to check if we're on ground at this position
-	Vec3 vStart = vPosition + Vec3(0, 0, 54.f);
-	Vec3 vEnd = vPosition - Vec3(0, 0, 1000.f);
+	// Store original state
+	Vec3 vOriginalOrigin = pLocal->m_vecOrigin();
+	Vec3 vOriginalVelocity = pLocal->m_vecVelocity();
+	int nOriginalFlags = pLocal->m_fFlags();
 
-	CGameTrace traceDown = {};
-	Ray_t rayDown;
-	rayDown.Init(vStart, vEnd);
-	CTraceFilterWorldAndPropsOnly filterDown;
-	filterDown.pSkip = pLocal;
-	I::EngineTrace->TraceRay(rayDown, MASK_SOLID, &filterDown, &traceDown);
+	// Set player to test position
+	pLocal->m_vecOrigin() = vPosition;
+	pLocal->m_vecVelocity() = { 0.f, 0.f, 0.f };
+	pLocal->m_fFlags() &= ~FL_ONGROUND;
 
-	if (!traceDown.DidHit())
-		return false;
-
-	// Check if we're too close to ceiling
-	Vec3 vTraceUpStart = traceDown.endpos + Vec3(0, 0, 2.f);
-	Vec3 vTraceUpEnd = vTraceUpStart + Vec3(0, 0, 100.f);
-
-	CGameTrace traceUp = {};
-	Ray_t rayUp;
-	rayUp.Init(vTraceUpStart, vTraceUpEnd);
-	CTraceFilterWorldAndPropsOnly filterUp;
-	filterUp.pSkip = pLocal;
-	I::EngineTrace->TraceRay(rayUp, MASK_SOLID, &filterUp, &traceUp);
-
-	if (traceUp.DidHit() && traceUp.fraction < 0.1f)
-		return false;
-
-	// Get gravity for velocity check
+	// Calculate TF2 pixelsurf velocity based on gravity and tickrate
 	static auto sv_gravity = H::ConVars.FindVar("sv_gravity");
 	if (!sv_gravity)
+	{
+		pLocal->m_vecOrigin() = vOriginalOrigin;
+		pLocal->m_vecVelocity() = vOriginalVelocity;
+		pLocal->m_fFlags() = nOriginalFlags;
 		return false;
+	}
 
 	float flGravity = sv_gravity->GetFloat();
 	float flTickRate = 1.0f / I::GlobalVars->interval_per_tick;
 	float flTargetZVel = -((flGravity / 2.0f) / flTickRate);
 
-	// Check if the position is at the right height for pixelsurf
-	// Pixelsurf works when you're at a specific height where the velocity from gravity matches the pixelsurf threshold
-	float flHeightAboveGround = vPosition.z - traceDown.endpos.z;
-	
-	// Calculate expected velocity at this height
-	float flExpectedVel = -sqrt(2.0f * flGravity * flHeightAboveGround);
-	
-	// Check if velocity is in the pixelsurf range (typically around -200 to -300 for pixelsurf)
-	bool bCanPixelSurf = fabs(flExpectedVel - flTargetZVel) < 50.0f;
+	// Run prediction to simulate falling (like arbuzebra does)
+	CUserCmd testCmd = *pCmd;
+	testCmd.forwardmove = 0.f;
+	testCmd.sidemove = 0.f;
+	testCmd.upmove = 0.f;
+	testCmd.buttons = 0;
 
-	return bCanPixelSurf;
+	F::EnginePrediction.Start(pLocal, &testCmd);
+	F::EnginePrediction.End(pLocal, &testCmd);
+
+	// Check if Z velocity matches calculated pixelsurf velocity
+	Vec3 vPredictedVelocity = pLocal->m_vecVelocity();
+	bool bIsPixelSurfVel = (fabs(vPredictedVelocity.z - flTargetZVel) < 0.5f);
+
+	// Restore original state
+	pLocal->m_vecOrigin() = vOriginalOrigin;
+	pLocal->m_vecVelocity() = vOriginalVelocity;
+	pLocal->m_fFlags() = nOriginalFlags;
+
+	return bIsPixelSurfVel;
 }
 
 void CPixelFinder::RenderPoints()
@@ -378,9 +471,9 @@ void CPixelFinder::Render()
 		}
 	}
 
-	// Disable point rendering to isolate which function causes crash
-	// RenderPoints();
-	// RenderSavedPoints();
+	// Enable point rendering
+	RenderPoints();
+	RenderSavedPoints();
 }
 
 bool CPixelFinder::InCrosshair(const Vec2& vScreenPos, float flRadius)
