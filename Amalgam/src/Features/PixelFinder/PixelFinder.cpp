@@ -1,5 +1,6 @@
 #include "PixelFinder.h"
 #include "../EnginePrediction/EnginePrediction.h"
+#include "../Simulation/MovementSimulation/MovementSimulation.h"
 #include <cmath>
 
 void CPixelFinder::DrawVerticalLine(CTFPlayer* pLocal, CUserCmd* pCmd)
@@ -122,6 +123,10 @@ void CPixelFinder::DetectPixelSurfPoints(CTFPlayer* pLocal, CUserCmd* pCmd)
 	int iMaxSteps = static_cast<int>(flLineLength);
 	vNewPoints.reserve(iMaxSteps + 1);
 
+	int iPositionsTested = 0;
+	int iPositionsPassedGeometry = 0;
+	int iPositionsPassedVelocity = 0;
+
 	for (int i = 0; i <= iMaxSteps; i++)
 	{
 		float flLerp = static_cast<float>(i);
@@ -152,6 +157,8 @@ void CPixelFinder::DetectPixelSurfPoints(CTFPlayer* pLocal, CUserCmd* pCmd)
 		else if (m_vWallNormal.x > 0 && m_vWallNormal.y == 0.f)
 			vPlayerPos = { m_vLineStart.x + flTestAl, m_vLineStart.y, flHeight };
 
+		iPositionsTested++;
+
 		// Check if position is valid (between floor and ceiling) - geometric check
 		CGameTrace traceDown = {};
 		Ray_t rayDown;
@@ -171,6 +178,8 @@ void CPixelFinder::DetectPixelSurfPoints(CTFPlayer* pLocal, CUserCmd* pCmd)
 		if (vPlayerPos.z + 1.f < traceDown.endpos.z || vPlayerPos.z + 1.f > traceUp.endpos.z)
 			continue;
 
+		iPositionsPassedGeometry++;
+
 		// Set player to test position
 		pLocal->m_vecOrigin() = vPlayerPos;
 		pLocal->m_vecVelocity() = { 0.f, 0.f, 0.f };
@@ -188,46 +197,134 @@ void CPixelFinder::DetectPixelSurfPoints(CTFPlayer* pLocal, CUserCmd* pCmd)
 		pCmd->buttons |= IN_JUMP;
 		pCmd->buttons |= IN_DUCK;
 
-		// Run prediction
-		F::EnginePrediction.Start(pLocal, pCmd);
-		F::EnginePrediction.End(pLocal, pCmd);
-
-		// Check if Z velocity matches pixelsurf velocity
-		Vec3 vPredictedVelocity = pLocal->m_vecVelocity();
-		bool bIsPixelSurfVel = (fabs(vPredictedVelocity.z - flTargetZVel) < 0.5f);
-
-		if (bIsPixelSurfVel)
+		// Debug: print movement inputs for first position
+		if (iPositionsPassedGeometry == 1)
 		{
-			// Calculate the actual pixelsurf point (offset back from wall)
-			Vec3 vPixelSurfPoint = vPlayerPos;
-			
-			if (m_vWallNormal.x < 0 && m_vWallNormal.y < 0.f)
-				vPixelSurfPoint = { vPlayerPos.x + flTestAl, vPlayerPos.y + flTestAl, vPlayerPos.z };
-			else if (m_vWallNormal.x < 0 && m_vWallNormal.y > 0.f)
-				vPixelSurfPoint = { vPlayerPos.x + flTestAl, vPlayerPos.y - flTestAl, vPlayerPos.z };
-			else if (m_vWallNormal.x > 0 && m_vWallNormal.y < 0.f)
-				vPixelSurfPoint = { vPlayerPos.x - flTestAl, vPlayerPos.y + flTestAl, vPlayerPos.z };
-			else if (m_vWallNormal.x > 0 && m_vWallNormal.y > 0.f)
-				vPixelSurfPoint = { vPlayerPos.x - flTestAl, vPlayerPos.y - flTestAl, vPlayerPos.z };
-			else if (m_vWallNormal.x == 0.f && m_vWallNormal.y > 0.f)
-				vPixelSurfPoint = { vPlayerPos.x, vPlayerPos.y - flTestAl, vPlayerPos.z };
-			else if (m_vWallNormal.x == 0.f && m_vWallNormal.y < 0.f)
-				vPixelSurfPoint = { vPlayerPos.x, vPlayerPos.y + flTestAl, vPlayerPos.z };
-			else if (m_vWallNormal.x < 0 && m_vWallNormal.y == 0.f)
-				vPixelSurfPoint = { vPlayerPos.x + flTestAl, vPlayerPos.y, vPlayerPos.z };
-			else if (m_vWallNormal.x > 0 && m_vWallNormal.y == 0.f)
-				vPixelSurfPoint = { vPlayerPos.x - flTestAl, vPlayerPos.y, vPlayerPos.z };
+			I::CVar->ConsolePrintf("  Movement inputs: forward=%.2f, side=%.2f, buttons=%d\n", 
+				pCmd->forwardmove, pCmd->sidemove, pCmd->buttons);
+		}
 
-			PixelSurfPoint_t point;
-			point.m_vPosition = vPixelSurfPoint;
-			point.m_sMap = I::EngineClient->GetLevelName();
-			point.m_flAnimationProgress = 0.f;
-			point.m_bIsAppearing = true;
-			point.m_bIsRemoving = false;
-			point.m_flCurrentSize = 0.f;
-			vNewPoints.push_back(point);
+		// Use MovementSimulation for multi-tick prediction (doesn't restore state between ticks)
+		MoveStorage tMoveStorage;
+		tMoveStorage.m_pPlayer = pLocal;
+		if (F::MoveSim.Initialize(pLocal, tMoveStorage, false, false))
+		{
+			F::MoveSim.SetDuck(tMoveStorage, true);
+			
+			// Run 16 ticks to let gravity accumulate
+			for (int nTick = 0; nTick < 16; nTick++)
+			{
+				F::MoveSim.RunTick(tMoveStorage, false);
+			}
+			
+			F::MoveSim.Restore(tMoveStorage);
+			
+			// Check if Z velocity matches pixelsurf velocity
+			Vec3 vPredictedVelocity = tMoveStorage.m_MoveData.m_vecVelocity;
+			float flVelocityDiff = fabs(vPredictedVelocity.z - flTargetZVel);
+			
+			// Strict check - must be exactly target velocity
+			bool bIsPixelSurfVel = (flVelocityDiff < 0.01f);
+
+			// Debug first few positions to see velocity values
+			if (iPositionsPassedGeometry <= 5)
+			{
+				I::CVar->ConsolePrintf("  Pos %d: Pred Z vel = %.2f, Target = %.2f, Diff = %.2f\n", 
+					iPositionsPassedGeometry, vPredictedVelocity.z, flTargetZVel, flVelocityDiff);
+			}
+
+			if (bIsPixelSurfVel)
+			{
+				iPositionsPassedVelocity++;
+				// Calculate the actual pixelsurf point (offset back from wall)
+				Vec3 vPixelSurfPoint = vPlayerPos;
+				
+				if (m_vWallNormal.x < 0 && m_vWallNormal.y < 0.f)
+					vPixelSurfPoint = { vPlayerPos.x + flTestAl, vPlayerPos.y + flTestAl, vPlayerPos.z };
+				else if (m_vWallNormal.x < 0 && m_vWallNormal.y > 0.f)
+					vPixelSurfPoint = { vPlayerPos.x + flTestAl, vPlayerPos.y - flTestAl, vPlayerPos.z };
+				else if (m_vWallNormal.x > 0 && m_vWallNormal.y < 0.f)
+					vPixelSurfPoint = { vPlayerPos.x - flTestAl, vPlayerPos.y + flTestAl, vPlayerPos.z };
+				else if (m_vWallNormal.x > 0 && m_vWallNormal.y > 0.f)
+					vPixelSurfPoint = { vPlayerPos.x - flTestAl, vPlayerPos.y - flTestAl, vPlayerPos.z };
+				else if (m_vWallNormal.x == 0.f && m_vWallNormal.y > 0.f)
+					vPixelSurfPoint = { vPlayerPos.x, vPlayerPos.y - flTestAl, vPlayerPos.z };
+				else if (m_vWallNormal.x == 0.f && m_vWallNormal.y < 0.f)
+					vPixelSurfPoint = { vPlayerPos.x, vPlayerPos.y + flTestAl, vPlayerPos.z };
+				else if (m_vWallNormal.x < 0 && m_vWallNormal.y == 0.f)
+					vPixelSurfPoint = { vPlayerPos.x + flTestAl, vPlayerPos.y, vPlayerPos.z };
+				else if (m_vWallNormal.x > 0 && m_vWallNormal.y == 0.f)
+					vPixelSurfPoint = { vPlayerPos.x - flTestAl, vPlayerPos.y, vPlayerPos.z };
+
+				PixelSurfPoint_t point;
+				point.m_vPosition = vPixelSurfPoint;
+				point.m_sMap = I::EngineClient->GetLevelName();
+				point.m_flAnimationProgress = 0.f;
+				point.m_bIsAppearing = true;
+				point.m_bIsRemoving = false;
+				point.m_flCurrentSize = 0.f;
+				vNewPoints.push_back(point);
+			}
+		}
+		else
+		{
+			// Fallback to single tick if MovementSimulation fails
+			F::EnginePrediction.Start(pLocal, pCmd);
+			F::EnginePrediction.End(pLocal, pCmd);
+			
+			Vec3 vPredictedVelocity = pLocal->m_vecVelocity();
+			float flVelocityDiff = fabs(vPredictedVelocity.z - flTargetZVel);
+			bool bIsPixelSurfVel = (flVelocityDiff < 0.5f);
+			
+			if (iPositionsPassedGeometry <= 5)
+			{
+				I::CVar->ConsolePrintf("  Pos %d (fallback): Pred Z vel = %.2f, Target = %.2f, Diff = %.2f\n", 
+					iPositionsPassedGeometry, vPredictedVelocity.z, flTargetZVel, flVelocityDiff);
+			}
+			
+			if (bIsPixelSurfVel)
+			{
+				iPositionsPassedVelocity++;
+				Vec3 vPixelSurfPoint = vPlayerPos;
+				
+				if (m_vWallNormal.x < 0 && m_vWallNormal.y < 0.f)
+					vPixelSurfPoint = { vPlayerPos.x + flTestAl, vPlayerPos.y + flTestAl, vPlayerPos.z };
+				else if (m_vWallNormal.x < 0 && m_vWallNormal.y > 0.f)
+					vPixelSurfPoint = { vPlayerPos.x + flTestAl, vPlayerPos.y - flTestAl, vPlayerPos.z };
+				else if (m_vWallNormal.x > 0 && m_vWallNormal.y < 0.f)
+					vPixelSurfPoint = { vPlayerPos.x - flTestAl, vPlayerPos.y + flTestAl, vPlayerPos.z };
+				else if (m_vWallNormal.x > 0 && m_vWallNormal.y > 0.f)
+					vPixelSurfPoint = { vPlayerPos.x - flTestAl, vPlayerPos.y - flTestAl, vPlayerPos.z };
+				else if (m_vWallNormal.x == 0.f && m_vWallNormal.y > 0.f)
+					vPixelSurfPoint = { vPlayerPos.x, vPlayerPos.y - flTestAl, vPlayerPos.z };
+				else if (m_vWallNormal.x == 0.f && m_vWallNormal.y < 0.f)
+					vPixelSurfPoint = { vPlayerPos.x, vPlayerPos.y + flTestAl, vPlayerPos.z };
+				else if (m_vWallNormal.x < 0 && m_vWallNormal.y == 0.f)
+					vPixelSurfPoint = { vPlayerPos.x + flTestAl, vPlayerPos.y, vPlayerPos.z };
+				else if (m_vWallNormal.x > 0 && m_vWallNormal.y == 0.f)
+					vPixelSurfPoint = { vPlayerPos.x - flTestAl, vPlayerPos.y, vPlayerPos.z };
+
+				PixelSurfPoint_t point;
+				point.m_vPosition = vPixelSurfPoint;
+				point.m_sMap = I::EngineClient->GetLevelName();
+				point.m_flAnimationProgress = 0.f;
+				point.m_bIsAppearing = true;
+				point.m_bIsRemoving = false;
+				point.m_flCurrentSize = 0.f;
+				vNewPoints.push_back(point);
+			}
 		}
 	}
+
+	// Debug output
+	I::CVar->ConsolePrintf("[PixelFinder] Detection Results:\n");
+	I::CVar->ConsolePrintf("  Positions tested: %d\n", iPositionsTested);
+	I::CVar->ConsolePrintf("  Passed geometry check: %d\n", iPositionsPassedGeometry);
+	I::CVar->ConsolePrintf("  Passed velocity check: %d\n", iPositionsPassedVelocity);
+	I::CVar->ConsolePrintf("  Points detected: %zu\n", vNewPoints.size());
+	I::CVar->ConsolePrintf("  Target Z velocity: %.2f\n", flTargetZVel);
+	I::CVar->ConsolePrintf("  Wall normal: (%.2f, %.2f, %.2f)\n", m_vWallNormal.x, m_vWallNormal.y, m_vWallNormal.z);
+	I::CVar->ConsolePrintf("  Is displacement: %s\n", m_bIsDisplacement ? "yes" : "no");
 
 	// Restore original state
 	pLocal->m_vecOrigin() = vOriginalOrigin;
@@ -240,6 +337,8 @@ void CPixelFinder::DetectPixelSurfPoints(CTFPlayer* pLocal, CUserCmd* pCmd)
 	// Swap vectors to minimize race condition window
 	m_vDetectedPoints.swap(vNewPoints);
 	m_bClearingPoints = false;
+
+	I::CVar->ConsolePrintf("[PixelFinder] Total points in buffer: %zu\n", m_vDetectedPoints.size());
 }
 
 bool CPixelFinder::TestPixelSurfAtPosition(CTFPlayer* pLocal, const Vec3& vPosition, const Vec3& vWallNormal, CUserCmd* pCmd)
@@ -299,6 +398,13 @@ void CPixelFinder::RenderPoints()
 	if (m_bClearingPoints)
 		return;
 
+	// Debug: log when rendering is called
+	static int nRenderCallCount = 0;
+	if (nRenderCallCount++ % 60 == 0)
+	{
+		I::CVar->ConsolePrintf("[PixelFinder] RenderPoints called, points in buffer: %zu\n", m_vDetectedPoints.size());
+	}
+
 	float flDeltaTime = I::GlobalVars->frametime;
 	const float flAppearanceDuration = 0.5f;
 	const float flDisappearanceDuration = 0.5f;
@@ -306,14 +412,8 @@ void CPixelFinder::RenderPoints()
 	const float flNormalSize = 9.f;
 	const float flInCrosshairSize = 12.f;
 
-	// Create a copy of points to avoid race conditions
-	std::vector<PixelSurfPoint_t> vPointsCopy;
-	{
-		vPointsCopy = m_vDetectedPoints;
-	}
-
-	// Update animations on the copy
-	for (auto& point : vPointsCopy)
+	// Update animations on the original points (not a copy)
+	for (auto& point : m_vDetectedPoints)
 	{
 		if (point.m_bIsAppearing)
 		{
@@ -360,27 +460,57 @@ void CPixelFinder::RenderPoints()
 		point.m_flCurrentSize += (flTargetSize - point.m_flCurrentSize) * (1.f - exp(-flSizeAnimationSpeed * flDeltaTime));
 	}
 
-	// Draw points from the copy
-	for (const auto& point : vPointsCopy)
+	// Draw points from the buffer
+	int nPointsDrawn = 0;
+	int nPointsW2SFailed = 0;
+	int nPointsOffscreen = 0;
+	int nPointsZeroAlpha = 0;
+	int nPointsZeroSize = 0;
+	float flFirstPointSize = 0.f;
+	float flFirstPointAlpha = 0.f;
+	Color_t tFirstPointColor = Vars::Misc::PixelFinder::PointColor.Value;
+	
+	for (const auto& point : m_vDetectedPoints)
 	{
 		Vec3 vScreenPos;
 		if (SDK::W2S(point.m_vPosition, vScreenPos))
 		{
 			// Validate screen coordinates
 			if (!isfinite(vScreenPos.x) || !isfinite(vScreenPos.y))
+			{
+				nPointsW2SFailed++;
 				continue;
+			}
 			if (vScreenPos.x < 0 || vScreenPos.x > H::Draw.m_nScreenW ||
 				vScreenPos.y < 0 || vScreenPos.y > H::Draw.m_nScreenH)
+			{
+				nPointsOffscreen++;
 				continue;
+			}
 
 			float flAlpha = point.m_flAnimationProgress * 255.f;
 			Color_t tColor = Vars::Misc::PixelFinder::PointColor.Value;
 			tColor.a = static_cast<byte>(flAlpha);
 
+			// Capture first point stats for debug
+			if (nPointsDrawn == 0 && nPointsW2SFailed == 0 && nPointsOffscreen == 0)
+			{
+				flFirstPointSize = point.m_flCurrentSize;
+				flFirstPointAlpha = flAlpha;
+				tFirstPointColor = tColor;
+			}
+
 			if (tColor.a > 0)
 			{
+				// Debug: check if size is too small to see
+				if (point.m_flCurrentSize < 1.f)
+				{
+					nPointsZeroSize++;
+				}
+				
 				// Draw circle
 				H::Draw.LineCircle(vScreenPos.x, vScreenPos.y, point.m_flCurrentSize, 32, tColor);
+				nPointsDrawn++;
 
 				// Draw filled circle if in crosshair
 				if (point.m_bInCrosshair)
@@ -393,7 +523,24 @@ void CPixelFinder::RenderPoints()
 					}
 				}
 			}
+			else
+			{
+				nPointsZeroAlpha++;
+			}
 		}
+		else
+		{
+			nPointsW2SFailed++;
+		}
+	}
+	
+	// Debug render stats
+	if (nRenderCallCount % 60 == 0)
+	{
+		I::CVar->ConsolePrintf("[PixelFinder] Render stats: drawn=%d, w2s_failed=%d, offscreen=%d, zero_alpha=%d, zero_size=%d\n", 
+			nPointsDrawn, nPointsW2SFailed, nPointsOffscreen, nPointsZeroAlpha, nPointsZeroSize);
+		I::CVar->ConsolePrintf("[PixelFinder] First point: size=%.2f, alpha=%.2f, color=(%d,%d,%d,%d)\n", 
+			flFirstPointSize, flFirstPointAlpha, tFirstPointColor.r, tFirstPointColor.g, tFirstPointColor.b, tFirstPointColor.a);
 	}
 }
 
@@ -445,24 +592,13 @@ void CPixelFinder::Render()
 	Vec3 vLineStart = m_vLineStart;
 	Vec3 vLineEnd = m_vLineEnd;
 
-	// Draw the line - always draw if coordinates are valid
+	// Draw the line - use W2S for 2D rendering
 	if (!vLineStart.IsZero() && !vLineEnd.IsZero())
 	{
 		Vec3 vStartScreen, vEndScreen;
 		if (SDK::W2S(vLineStart, vStartScreen) && 
 			SDK::W2S(vLineEnd, vEndScreen))
 		{
-			// Validate screen coordinates
-			if (!isfinite(vStartScreen.x) || !isfinite(vStartScreen.y) ||
-				!isfinite(vEndScreen.x) || !isfinite(vEndScreen.y))
-				return;
-			if (vStartScreen.x < 0 || vStartScreen.x > H::Draw.m_nScreenW ||
-				vStartScreen.y < 0 || vStartScreen.y > H::Draw.m_nScreenH)
-				return;
-			if (vEndScreen.x < 0 || vEndScreen.x > H::Draw.m_nScreenW ||
-				vEndScreen.y < 0 || vEndScreen.y > H::Draw.m_nScreenH)
-				return;
-
 			Color_t tLineColor = Vars::Misc::PixelFinder::LineColor.Value;
 			if (tLineColor.a > 0)
 			{
