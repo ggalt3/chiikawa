@@ -76,22 +76,23 @@ void CMenu::DrawMenu()
 		RenderTwoToneBackground(flSize, {}, F::Render.Background1, F::Render.Background2, 0.f, false);
 		PopClipRect();
 
-		static int iTab = 0, iAimbotTab = 0, iVisualsTab = 0, iLogsTab = 0, iSettingsTab = 0;
+		static int iTab = 0, iAimbotTab = 0, iVisualsTab = 0, iMovementTab = 0, iLogsTab = 0, iSettingsTab = 0;
 		PushFont(F::Render.FontBold);
 		FTabs(
 			{
 				{ "AIMBOT", "GENERAL", "DRAW" },
 				{ "HVH" },
 				{ "VISUALS", "ESP", "MISC##", "MENU" },
+				{ "MOVEMENT", "PIXEL SURF ASSIST" },
 				{ "MISC" },
 				{ "LOGS", "PLAYERLIST", "SETTINGS##", "OUTPUT" },
 				{ "SETTINGS", "CONFIG", "BINDS", "MATERIALS", "EXTRA" }
 			},
-			{ &iTab, &iAimbotTab, nullptr, &iVisualsTab, nullptr, &iLogsTab, &iSettingsTab },
+			{ &iTab, &iAimbotTab, nullptr, &iVisualsTab, &iMovementTab, nullptr, &iLogsTab, &iSettingsTab },
 			{ flSize - H::Draw.Scale(16), H::Draw.Scale(36) },
 			{ H::Draw.Scale(8), H::Draw.Scale(8) + flOffset },
 			FTabsEnum::Vertical | FTabsEnum::HorizontalIcons | FTabsEnum::AlignLeft | FTabsEnum::BarLeft,
-			{ { ICON_MD_PERSON }, { ICON_MD_BOLT }, { ICON_MD_VISIBILITY }, { ICON_MD_ARTICLE }, { ICON_MD_IMPORT_CONTACTS }, { ICON_MD_SETTINGS } },
+			{ { ICON_MD_PERSON }, { ICON_MD_BOLT }, { ICON_MD_VISIBILITY }, { ICON_MD_DIRECTIONS_RUN }, { ICON_MD_ARTICLE }, { ICON_MD_IMPORT_CONTACTS }, { ICON_MD_SETTINGS } },
 			{ H::Draw.Scale(10), 0 }, {},
 			{}, { H::Draw.Scale(22), 0 }
 		);
@@ -121,9 +122,10 @@ void CMenu::DrawMenu()
 				case 0: MenuAimbot(iAimbotTab); break;
 				case 1: MenuHVH(); break;
 				case 2: MenuVisuals(iVisualsTab); break;
-				case 3: MenuMisc(); break;
-				case 4: MenuLogs(iLogsTab); break;
-				case 5: MenuSettings(iSettingsTab); break;
+				case 3: MenuMovement(iMovementTab); break;
+				case 4: MenuMisc(); break;
+				case 5: MenuLogs(iLogsTab); break;
+				case 6: MenuSettings(iSettingsTab); break;
 				}
 			}
 			else
@@ -1254,6 +1256,54 @@ void CMenu::MenuVisuals(int iTab)
 		}
 		break;
 	}
+	}
+}
+
+void CMenu::MenuMovement(int iTab)
+{
+	using namespace ImGui;
+
+	switch (iTab)
+	{
+	// Pixel Surf Assist
+	case 0:
+	{
+		if (BeginTable("MovementTable", 2))
+		{
+			/* Column 1 */
+			TableNextColumn();
+			{
+				if (Section("Pixel Surf Assist"))
+				{
+					FToggle(Vars::Misc::Movement::PixelSurfAssist::Enabled, FToggleEnum::Left);
+					FToggle(Vars::Misc::Movement::PixelSurfAssist::AutoStrafe, FToggleEnum::Right);
+					FSlider(Vars::Misc::Movement::PixelSurfAssist::JumpHeight, FSliderEnum::Left);
+					FSlider(Vars::Misc::Movement::PixelSurfAssist::DuckHeight, FSliderEnum::Right);
+					FSlider(Vars::Misc::Movement::PixelSurfAssist::ActivationDistance, FSliderEnum::Left);
+					FToggle(Vars::Misc::Movement::PixelSurfAssist::VisualizeTarget, FToggleEnum::Right);
+				} EndSection();
+			}
+			/* Column 2 */
+			TableNextColumn();
+			{
+				if (Section("Info"))
+				{
+					FText("Pixel Surf Assist helps you hit");
+					FText("saved pixelsurf points by", FTextEnum::Right);
+					FText("automatically adjusting");
+					FText("your height and movement.", FTextEnum::Right);
+					FText("");
+					FText("1. Save pixelsurf points using");
+					FText("the Pixel Finder feature.", FTextEnum::Right);
+					FText("2. Enable Pixel Surf Assist.");
+					FText("3. Get near a saved point");
+					FText("and it will assist you.", FTextEnum::Right);
+				} EndSection();
+			}
+		}
+		EndTable();
+	}
+	break;
 	}
 }
 

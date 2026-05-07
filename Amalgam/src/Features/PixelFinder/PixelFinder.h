@@ -36,6 +36,10 @@ private:
 	Vec3 RoundPosition(const Vec3& vPoint);
 	bool TestPixelSurfAtPosition(CTFPlayer* pLocal, const Vec3& vPosition, const Vec3& vWallNormal, CUserCmd* pCmd);
 	
+	// Pixelsurf Assist
+	void RunPixelSurfAssist(CTFPlayer* pLocal, CUserCmd* pCmd);
+	PixelSurfPoint_t* FindNearestSavedPoint(CTFPlayer* pLocal);
+	
 public:
 	void Run(CTFPlayer* pLocal, CUserCmd* pCmd);
 	void Render();

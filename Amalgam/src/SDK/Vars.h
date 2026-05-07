@@ -730,6 +730,15 @@ NAMESPACE_BEGIN(Vars)
 			CVar(AutoRocketJumpSkipAir, "Skip air", 1, NOSAVE | DEBUGVAR, 0, 3);
 			CVar(AutoRocketJumpTimingOffset, "Timing offset", 0, NOSAVE | DEBUGVAR, 0, 3);
 			CVar(AutoRocketJumpApplyAbove, "Apply offset above", 0, NOSAVE | DEBUGVAR, 0, 10);
+
+			NAMESPACE_BEGIN(PixelSurfAssist, Pixel Surf Assist)
+				CVar(Enabled, VA_LIST("Enabled", "Pixel surf assist"), false);
+				CVar(AutoStrafe, "Auto strafe into wall", true);
+				CVar(JumpHeight, "Jump height offset", 0.f, SLIDER_PRECISION, -10.f, 10.f, 0.5f);
+				CVar(DuckHeight, "Duck height offset", 0.f, SLIDER_PRECISION, -10.f, 10.f, 0.5f);
+				CVar(ActivationDistance, "Activation distance", 50.f, SLIDER_MIN | SLIDER_PRECISION, 10.f, 200.f, 5.f);
+				CVar(VisualizeTarget, "Visualize target height", true);
+			NAMESPACE_END(PixelSurfAssist)
 		NAMESPACE_END(Movement)
 
 		NAMESPACE_BEGIN(Automation)

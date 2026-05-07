@@ -118,44 +118,61 @@ void CPixelFinder::DetectPixelSurfPoints(CTFPlayer* pLocal, CUserCmd* pCmd)
 	float flOriginalForwardMove = pCmd->forwardmove;
 	float flOriginalSideMove = pCmd->sidemove;
 
-	// Scan along the vertical line (DNA approach - unit intervals)
+	// Scan along the vertical line height, but use actual wall surface at each height
 	std::vector<PixelSurfPoint_t> vNewPoints;
-	int iMaxSteps = static_cast<int>(flLineLength);
-	vNewPoints.reserve(iMaxSteps + 1);
+	int iMaxVerticalSteps = static_cast<int>(flLineLength);
+	vNewPoints.reserve(iMaxVerticalSteps + 1);
 
 	int iPositionsTested = 0;
 	int iPositionsPassedGeometry = 0;
 	int iPositionsPassedVelocity = 0;
 
-	for (int i = 0; i <= iMaxSteps; i++)
+	for (int j = 0; j <= iMaxVerticalSteps; j++)
 	{
-		float flLerp = static_cast<float>(i);
+		float flVerticalLerp = static_cast<float>(j);
+
+		// Calculate height (vertical)
 		float flHeight;
-		
 		if (m_vLineStart.z > m_vLineEnd.z)
-			flHeight = m_vLineStart.z - flLerp;
+			flHeight = m_vLineStart.z - flVerticalLerp;
 		else
-			flHeight = m_vLineEnd.z - flLerp;
+			flHeight = m_vLineEnd.z - flVerticalLerp;
+
+		// Trace from line start at this height to find actual wall surface
+		Vec3 vTraceStart = { m_vLineStart.x, m_vLineStart.y, flHeight };
+		Vec3 vTraceEnd = vTraceStart - m_vWallNormal * 100.f;
+
+		CGameTrace traceToWall = {};
+		Ray_t rayToWall;
+		rayToWall.Init(vTraceStart, vTraceEnd);
+		CTraceFilterWorldAndPropsOnly filterToWall;
+		filterToWall.pSkip = pLocal;
+		I::EngineTrace->TraceRay(rayToWall, MASK_SOLID, &filterToWall, &traceToWall);
+
+		if (!traceToWall.DidHit() || traceToWall.endpos.IsZero())
+			continue;
+
+		Vec3 vWallPos = traceToWall.endpos;
 
 		// Calculate player position offset from wall based on wall normal (DNA geometric approach)
-		Vec3 vPlayerPos = m_vLineStart;
+		Vec3 vPlayerPos;
 		
 		if (m_vWallNormal.x < 0 && m_vWallNormal.y < 0.f)
-			vPlayerPos = { m_vLineStart.x - flTestAl, m_vLineStart.y - flTestAl, flHeight };
+			vPlayerPos = { vWallPos.x - flTestAl, vWallPos.y - flTestAl, flHeight };
 		else if (m_vWallNormal.x < 0 && m_vWallNormal.y > 0.f)
-			vPlayerPos = { m_vLineStart.x - flTestAl, m_vLineStart.y + flTestAl, flHeight };
+			vPlayerPos = { vWallPos.x - flTestAl, vWallPos.y + flTestAl, flHeight };
 		else if (m_vWallNormal.x > 0 && m_vWallNormal.y < 0.f)
-			vPlayerPos = { m_vLineStart.x + flTestAl, m_vLineStart.y - flTestAl, flHeight };
+			vPlayerPos = { vWallPos.x + flTestAl, vWallPos.y - flTestAl, flHeight };
 		else if (m_vWallNormal.x > 0 && m_vWallNormal.y > 0.f)
-			vPlayerPos = { m_vLineStart.x + flTestAl, m_vLineStart.y + flTestAl, flHeight };
+			vPlayerPos = { vWallPos.x + flTestAl, vWallPos.y + flTestAl, flHeight };
 		else if (m_vWallNormal.x == 0.f && m_vWallNormal.y > 0.f)
-			vPlayerPos = { m_vLineStart.x, m_vLineStart.y + flTestAl, flHeight };
+			vPlayerPos = { vWallPos.x, vWallPos.y + flTestAl, flHeight };
 		else if (m_vWallNormal.x == 0.f && m_vWallNormal.y < 0.f)
-			vPlayerPos = { m_vLineStart.x, m_vLineStart.y - flTestAl, flHeight };
+			vPlayerPos = { vWallPos.x, vWallPos.y - flTestAl, flHeight };
 		else if (m_vWallNormal.x < 0 && m_vWallNormal.y == 0.f)
-			vPlayerPos = { m_vLineStart.x - flTestAl, m_vLineStart.y, flHeight };
+			vPlayerPos = { vWallPos.x - flTestAl, vWallPos.y, flHeight };
 		else if (m_vWallNormal.x > 0 && m_vWallNormal.y == 0.f)
-			vPlayerPos = { m_vLineStart.x + flTestAl, m_vLineStart.y, flHeight };
+			vPlayerPos = { vWallPos.x + flTestAl, vWallPos.y, flHeight };
 
 		iPositionsTested++;
 
@@ -185,11 +202,15 @@ void CPixelFinder::DetectPixelSurfPoints(CTFPlayer* pLocal, CUserCmd* pCmd)
 		pLocal->m_vecVelocity() = { 0.f, 0.f, 0.f };
 		pLocal->m_fFlags() &= ~FL_ONGROUND;
 
-		// Set movement input to align with wall (DNA approach)
+		// Set view angles to point into wall (disconnect from actual player)
 		Vec3 vWallAngles = { -m_vWallNormal.x, -m_vWallNormal.y, 0.f };
 		Vec3 vToWall;
 		Math::VectorAngles(vWallAngles, vToWall);
-		float flRotation = Math::Deg2Rad(vToWall.y - pCmd->viewangles.y);
+		pCmd->viewangles = vToWall;
+		pLocal->m_angRotation() = vToWall;
+
+		// Set movement input to align with wall (DNA approach)
+		float flRotation = Math::Deg2Rad(vToWall.y - vToWall.y); // Now 0 since we set viewangles
 		float flCosRot = cos(flRotation);
 		float flSinRot = sin(flRotation);
 		pCmd->forwardmove = flCosRot * 10.f;
@@ -696,9 +717,157 @@ void CPixelFinder::ClearSavedPoints()
 	m_bClearingPoints = false;
 }
 
+PixelSurfPoint_t* CPixelFinder::FindNearestSavedPoint(CTFPlayer* pLocal)
+{
+	if (m_vSavedPoints.empty())
+	{
+		I::CVar->ConsolePrintf("[PixelSurf Assist] No saved points available\n");
+		return nullptr;
+	}
+
+	Vec3 vPlayerPos = pLocal->m_vecOrigin();
+	PixelSurfPoint_t* pNearest = nullptr;
+	float flNearestDist = Vars::Misc::Movement::PixelSurfAssist::ActivationDistance.Value;
+	std::string sCurrentMap = I::EngineClient->GetLevelName();
+
+	I::CVar->ConsolePrintf("[PixelSurf Assist] Current map: %s, Saved points: %zu\n", sCurrentMap.c_str(), m_vSavedPoints.size());
+
+	for (auto& point : m_vSavedPoints)
+	{
+		// Check if point is on current map
+		if (point.m_sMap != sCurrentMap)
+		{
+			I::CVar->ConsolePrintf("[PixelSurf Assist] Skipping point - map mismatch: %s vs %s\n", point.m_sMap.c_str(), sCurrentMap.c_str());
+			continue;
+		}
+
+		float flDist = vPlayerPos.DistTo(point.m_vPosition);
+		I::CVar->ConsolePrintf("[PixelSurf Assist] Point distance: %.2f (max: %.2f)\n", flDist, flNearestDist);
+		
+		if (flDist < flNearestDist)
+		{
+			flNearestDist = flDist;
+			pNearest = &point;
+		}
+	}
+
+	if (pNearest)
+		I::CVar->ConsolePrintf("[PixelSurf Assist] Found nearest point at distance %.2f\n", flNearestDist);
+	else
+		I::CVar->ConsolePrintf("[PixelSurf Assist] No point within activation distance\n");
+
+	return pNearest;
+}
+
+void CPixelFinder::RunPixelSurfAssist(CTFPlayer* pLocal, CUserCmd* pCmd)
+{
+	I::CVar->ConsolePrintf("[PixelSurf Assist] RunPixelSurfAssist called\n");
+	
+	// Find nearest saved pixelsurf point
+	PixelSurfPoint_t* pTargetPoint = FindNearestSavedPoint(pLocal);
+	if (!pTargetPoint)
+		return;
+
+	Vec3 vPlayerPos = pLocal->m_vecOrigin();
+	Vec3 vTargetPos = pTargetPoint->m_vPosition;
+
+	// Calculate height difference
+	float flHeightDiff = vTargetPos.z - vPlayerPos.z;
+	float flJumpOffset = Vars::Misc::Movement::PixelSurfAssist::JumpHeight.Value;
+	float flDuckOffset = Vars::Misc::Movement::PixelSurfAssist::DuckHeight.Value;
+
+	I::CVar->ConsolePrintf("[PixelSurf Assist] Height diff: %.2f, Jump offset: %.2f, Duck offset: %.2f\n", flHeightDiff, flJumpOffset, flDuckOffset);
+
+	// Calculate direction to wall (from player to target)
+	Vec3 vToTarget = vTargetPos - vPlayerPos;
+	vToTarget.z = 0.f; // Only horizontal direction
+	float flDist = vToTarget.Length();
+	if (flDist < 1.f)
+		return;
+
+	vToTarget = vToTarget / flDist; // Normalize
+
+	// Calculate strafe direction (perpendicular to wall normal)
+	Vec3 vWallNormal = -vToTarget; // Wall normal points away from wall
+	Vec3 vStrafeDir = { -vWallNormal.y, vWallNormal.x, 0.f };
+
+	// Determine which strafe direction to use based on player's current velocity
+	Vec3 vPlayerVel = pLocal->m_vecVelocity();
+	vPlayerVel.z = 0.f;
+	float flDot = vPlayerVel.Dot(vStrafeDir);
+	if (flDot < 0.f)
+		vStrafeDir = -vStrafeDir;
+
+	I::CVar->ConsolePrintf("[PixelSurf Assist] To target: (%.2f, %.2f), Strafe dir: (%.2f, %.2f)\n", vToTarget.x, vToTarget.y, vStrafeDir.x, vStrafeDir.y);
+
+	// Apply auto strafe if enabled
+	if (Vars::Misc::Movement::PixelSurfAssist::AutoStrafe.Value)
+	{
+		// Convert direction vectors to movement inputs based on player view angles
+		Vec3 vViewAngles = pLocal->m_angEyeAngles();
+		float flYaw = Math::Deg2Rad(vViewAngles.y);
+		
+		float flForward = vToTarget.x * cos(flYaw) - vToTarget.y * sin(flYaw);
+		float flSide = vToTarget.x * sin(flYaw) + vToTarget.y * cos(flYaw);
+		
+		float flStrafeForward = vStrafeDir.x * cos(flYaw) - vStrafeDir.y * sin(flYaw);
+		float flStrafeSide = vStrafeDir.x * sin(flYaw) + vStrafeDir.y * cos(flYaw);
+		
+		pCmd->forwardmove = flForward * 450.f;
+		pCmd->sidemove = flStrafeSide * 450.f;
+		
+		I::CVar->ConsolePrintf("[PixelSurf Assist] Applied movement - forward: %.2f, side: %.2f\n", pCmd->forwardmove, pCmd->sidemove);
+	}
+
+	// Calculate target height with offsets
+	float flTargetHeight = vTargetPos.z + flJumpOffset - flDuckOffset;
+
+	// Use jump if on ground and need to go up
+	bool bOnGround = (pLocal->m_fFlags() & FL_ONGROUND);
+	if (bOnGround && flHeightDiff > 5.f)
+	{
+		pCmd->buttons |= IN_JUMP;
+		I::CVar->ConsolePrintf("[PixelSurf Assist] Applied IN_JUMP\n");
+	}
+
+	// Use duck if need to go down or to fine-tune height
+	if (flHeightDiff < -2.f || (flHeightDiff > 0.f && flHeightDiff < 5.f))
+	{
+		pCmd->buttons |= IN_DUCK;
+		I::CVar->ConsolePrintf("[PixelSurf Assist] Applied IN_DUCK\n");
+	}
+
+	// Visualize target height if enabled
+	if (Vars::Misc::Movement::PixelSurfAssist::VisualizeTarget.Value)
+	{
+		Vec3 vScreenPos;
+		if (SDK::W2S(vTargetPos, vScreenPos))
+		{
+			// Draw a line from player to target height
+			Vec3 vPlayerScreen;
+			Vec3 vPlayerTop = { vPlayerPos.x, vPlayerPos.y, flTargetHeight };
+			if (SDK::W2S(vPlayerTop, vPlayerScreen))
+			{
+				Color_t tLineColor;
+				tLineColor.SetRGB(0, 255, 100, 255);
+				H::Draw.Line(vPlayerScreen.x, vPlayerScreen.y, vScreenPos.x, vScreenPos.y, tLineColor);
+			}
+		}
+	}
+}
+
 void CPixelFinder::Run(CTFPlayer* pLocal, CUserCmd* pCmd)
 {
-	if (!Vars::Misc::PixelFinder::Enabled.Value || !pLocal || !pLocal->IsAlive())
+	if (!pLocal || !pLocal->IsAlive())
+		return;
+
+	// Run pixelsurf assist if enabled
+	if (Vars::Misc::Movement::PixelSurfAssist::Enabled.Value)
+	{
+		RunPixelSurfAssist(pLocal, pCmd);
+	}
+
+	if (!Vars::Misc::PixelFinder::Enabled.Value)
 		return;
 
 	DrawVerticalLine(pLocal, pCmd);
